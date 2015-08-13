@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<link rel="import" href="/perf_insights/value/value.html">
+<link rel="import" href="/perf_insights/map_function.html">
+<script>
+tr.exportTo('pie', function() {
+  function kind(o) {
+    if (o instanceof tr.e.rail.ResponseInteractionRecord) {
+      return 'response';
+    }
+    if (o instanceof tr.e.rail.IdleInteractionRecord) {
+      return 'idle';
+    }
+    if (o instanceof tr.e.rail.AnimationInteractionRecord) {
+      return 'animation';
+    }
+    if (o instanceof tr.e.rail.LoadInteractionRecord) {
+      return 'load';
+    }
+    throw 'no idea what kind of thing this is';
+  }
+
+  function m(results, runInfo, model) {
+    var eventHisto = {};
+    model.interaction_records
+      .filter(function(x) {
+        return x instanceof tr.e.rail.RAILInteractionRecord;
+      })
+      .forEach(function(r) {
+        var name = kind(r);
+        var count = eventHisto[name] || 0;
+        eventHisto[name] = count + 1;
+      });
+    results.addValue(new pi.v.DictValue(runInfo, 'counts', eventHisto));
+  }
+  pi.MapFunction.register(m);
+  return {
+    m: m
+  };
+});
+</script>

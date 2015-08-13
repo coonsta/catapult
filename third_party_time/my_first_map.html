@@ -1,7 +1,8 @@
 <!DOCTYPE html>
 <link rel="import" href="/perf_insights/value/value.html">
 <link rel="import" href="/perf_insights/map_function.html">
-<script>
+<script>'use strict';
+
 tr.exportTo('pie', function() {
   function kind(o) {
     if (o instanceof tr.e.rail.ResponseInteractionRecord) {
@@ -17,6 +18,20 @@ tr.exportTo('pie', function() {
       return 'load';
     }
     throw 'no idea what kind of thing this is';
+  }
+
+  // Guesses whether two URLs have the same origin.
+  function isSameOrigin(urlA, urlB) {
+    var cheesyOriginPattern = /^([^:]+):(\/\/)?([^/]+)/;
+    var a = urlA.match(cheesyOriginPattern);
+    var b = urlB.match(cheesyOriginPattern);
+    if (!a) {
+      throw 'failed to cheesily parse "' + urlA + '"';
+    }
+    if (!b) {
+      throw 'failed to cheesily parse "' + urlB + '"';
+    }
+    return a[0] == b[0];
   }
 
   // Finds frame loads and classifies them as same-origin or
@@ -43,13 +58,22 @@ tr.exportTo('pie', function() {
               'cannot guess what URL is loaded in frame ' + frameId;
       }
       if (frameId in frames) {
-        //throw 'encountered multiple CommitLoads for ' + frameId;
-        frames[frameId].otherUrls.push(lastUrl);
-      } else {
-        frames[frameId] = {url: lastUrl, otherUrls: []};
+        if (lastUrl != frames[frameId].url) {
+          // TODO: This does happen, and we could handle it by dividing frame
+          // IDs up into disjoint time ranges.
+          throw 'encountered multiple CommitLoads for ' + frameId + ': "' +
+                frames[frameId].url + '" and "' + lastUrl + '"';
+        }
+        lastUrl = null;
+        return;
       }
+
+      var frame = {url: lastUrl};
       lastUrl = null;
-      if (event.args.data.isMainFrame) {
+      frames[frameId] = frame;
+
+      frame.isMainFrame = event.args.data.isMainFrame;
+      if (frame.isMainFrame) {
         if (mainFrameId) {
           throw 'found two main frames: ' + mainFrameId + ' and ' +
                 event.args.data.frame;
@@ -57,6 +81,18 @@ tr.exportTo('pie', function() {
         mainFrameId = event.args.data.frame;
       }
     });
+
+    if (!mainFrameId) {
+      throw 'did not find a main frame';
+    }
+
+    var mainFrameUrl = frames[mainFrameId].url;
+    for (var id in frames) {
+      if (!(frames.hasOwnProperty(id) && frames[id].url)) {
+        continue;
+      }
+      frames[id].isSameOrigin = isSameOrigin(frames[id].url, mainFrameUrl);
+    }
 
     return {
       mainFrameId: mainFrameId,

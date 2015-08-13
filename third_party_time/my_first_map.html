@@ -19,6 +19,51 @@ tr.exportTo('pie', function() {
     throw 'no idea what kind of thing this is';
   }
 
+  // Finds frame loads and classifies them as same-origin or
+  // cross-origin (also known as "third party".) Limitations: This
+  // does not handle a frame being navigated and reused; it uses
+  // CommitLoad, it does not handle a frame being populated from
+  // script.
+  function findFrames(model) {
+    var mainFrameId;
+    var lastUrl;
+    var frames = {};
+    model.iterateAllEvents(function(event) {
+      if (event.title == 'RenderFrameImpl::didCommitProvisionalLoad') {
+        lastUrl = event.args.url;
+        return;
+      }
+      if (event.title != 'CommitLoad') {
+        return;
+      }
+      var frameId = event.args.data.frame;
+      if (!lastUrl) {
+        throw 'encountered a CommitLoad without a preceding ' +
+              'RenderFrameImpl::didCommitProvisionalLoad; ' +
+              'cannot guess what URL is loaded in frame ' + frameId;
+      }
+      if (frameId in frames) {
+        //throw 'encountered multiple CommitLoads for ' + frameId;
+        frames[frameId].otherUrls.push(lastUrl);
+      } else {
+        frames[frameId] = {url: lastUrl, otherUrls: []};
+      }
+      lastUrl = null;
+      if (event.args.data.isMainFrame) {
+        if (mainFrameId) {
+          throw 'found two main frames: ' + mainFrameId + ' and ' +
+                event.args.data.frame;
+        }
+        mainFrameId = event.args.data.frame;
+      }
+    });
+
+    return {
+      mainFrameId: mainFrameId,
+      frames: frames
+    };
+  }
+
   function m(results, runInfo, model) {
     var eventHisto = {};
     model.interaction_records
@@ -29,8 +74,15 @@ tr.exportTo('pie', function() {
         var name = kind(r);
         var count = eventHisto[name] || 0;
         eventHisto[name] = count + 1;
+
+        name += '/' + r.associatedEvents.length;
+        count = eventHisto[name] || 0;
+        eventHisto[name] = count + 1;
       });
     results.addValue(new pi.v.DictValue(runInfo, 'counts', eventHisto));
+
+    var frames = findFrames(model);
+    results.addValue(new pi.v.DictValue(runInfo, 'frames', frames));
   }
   pi.MapFunction.register(m);
   return {

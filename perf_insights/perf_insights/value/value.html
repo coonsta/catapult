@@ -99,8 +99,10 @@ tr.exportTo('pi.v', function() {
       stack = options.stack;
     }
 
-    if (typeof stack !== 'string')
-      throw new Error('stack must be provided as a string');
+    if (typeof stack !== 'string') {
+      //throw new Error('stack must be provided as a string');
+      stack = '' + stack;
+    }
 
     Value.call(this, run_info, name, options);
     this.stack = stack;

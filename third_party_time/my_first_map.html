@@ -100,7 +100,119 @@ tr.exportTo('pie', function() {
     };
   }
 
+  // Finds CrRendererMain in model. Throws if there is more than one.
+  function mainThread(model) {
+    var mainThread;
+    for (var pid in model.processes) {
+      var process = model.processes[pid];
+      for (var tid in process.threads) {
+        var thread = process.threads[tid];
+        if (thread.name == 'CrRendererMain') {
+          if (mainThread) {
+            // TODO: We could support analyzing multiple main threads
+            // by returning a collection of them.
+            throw 'found multiple renderer main threads';
+          }
+          mainThread = thread;
+        }
+      }
+    }
+    if (!mainThread) {
+      throw 'did not find a main thread';
+    }
+    return mainThread;
+  }
+
+  function topLevelSlices(thread) {
+    return thread.sliceGroup.slices.filter(function (s) {
+      return s.category == 'toplevel';
+    });
+  }
+
+  // Hackily finds a frame ID associated with a slice.
+  function findFrame(slice) {
+    switch (slice.title) {
+      case 'EvaluateScript':
+      case 'FireAnimationFrame':
+      case 'FunctionCall':
+      case 'TimerFire':
+      case 'XHRLoad':
+      case 'XHRReadyStateChange':
+      // FIXME: Should layout, paint costs be broken out? Probably.
+      case 'Paint':
+      case 'UpdateLayerTree':
+        return slice.args.data.frame;
+
+      case 'ParseHTML':
+      // FIXME: Should layout, paint costs be broken out? Probably.
+      case 'Layout':
+      case 'UpdateLayoutTree':
+        return slice.args.beginData.frame;
+
+      // Not sure about these:
+      case 'CommitLoad':
+      case 'MarkDOMContent':
+      case 'MarkLoad':
+      case 'ResourceReceiveResponse':
+      case 'ResourceReceivedData':
+      case 'ResourceSendRequest':
+        // Ignored.
+        return null;
+
+      // Not interested in these; graphics:
+      case 'LayerTreeHost::DoUpdateLayers': // source_frame_number
+      case 'PictureLayer::Update':          // source_frame_number
+      case 'ThreadProxy::BeginMainFrame':   // begin_frame_id
+        // Ignored.
+        return null;
+
+      default:
+        break;
+    }
+
+    // Sanity check: Look for other things that have a frame hanging
+    // around one or two levels in.
+    for (var prop in slice.args) {
+      var looksLikeAFrame = /[Ff]rame/;
+      if (looksLikeAFrame.test(prop)) {
+        throw 'found ' + slice.title + ' has frame-y property ' + prop;
+      }
+      for (var subprop in slice.args[prop]) {
+        if (looksLikeAFrame.test(subprop)) {
+          throw 'found ' + slice.title + ' has frame-y property ' + prop + '.' + subprop;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function timeInThirdPartyFrames(frames, slice) {
+    var frameId = findFrame(slice);
+    if (!frameId) {
+      return slice.subSlices.reduce(function(sum, subSlice) {
+        return sum + timeInThirdPartyFrames(frames, subSlice);
+      }, 0);
+    }
+    var frame = frames.frames[frameId];
+    if (!frame) {
+      var frameIds = [];
+      for (var f in frames.frames) {
+        frameIds.push(f);
+      }
+      // FIXME, this happens in every trace, where are these phantom frames
+      // coming from?
+      //throw 'did not find a recorded frame with ID ' + frameId + '; frames are: ' + frameIds.join(', ');
+      return 0;
+    }
+    return frame.isSameOrigin ? 0 : slice.duration;
+  }
+
   function m(results, runInfo, model) {
+    var frames = findFrames(model);
+    results.addValue(new pi.v.DictValue(runInfo, 'frames', frames));
+
+/*
     var eventHisto = {};
     model.interaction_records
       .filter(function(x) {
@@ -116,13 +228,72 @@ tr.exportTo('pie', function() {
         eventHisto[name] = count + 1;
       });
     results.addValue(new pi.v.DictValue(runInfo, 'counts', eventHisto));
+*/
+    var perTasksTimeInThirdPartyFrames = [];
+    topLevelSlices(mainThread(model)).forEach(function(slice) {
+      perTasksTimeInThirdPartyFrames.push({
+        duration: slice.duration,
+        thirdPartyDuration: timeInThirdPartyFrames(frames, slice)
+      });
+    });
 
-    var frames = findFrames(model);
-    results.addValue(new pi.v.DictValue(runInfo, 'frames', frames));
+    // Ideas for my own buckets:
+    // Renderer thread tasks taking >75ms.
+    // Events between WebViewImpl::beginFrames.
+
+    // Want to determine:
+    // RAIL budget
+    // Total time
+    // Time in 3rd parties
+    var data = [];
+    model.interaction_records.forEach(function(record) {
+      var datum = {
+        kind: kind(record),
+        durationMsec: record.duration
+      };
+      data.push(datum);
+    });
+    results.addValue(new pi.v.DictValue(runInfo, 'dataset', {
+      data: data,
+      taskThirdPartyTime: perTasksTimeInThirdPartyFrames
+    }));
+
+    // Experimentally, it if an event is in associatedEvents, so are
+    // all of its descendents.
   }
   pi.MapFunction.register(m);
   return {
     m: m
   };
 });
-</script>
+
+/*
+        Experiment to verify that all descendents appear in a RAIL
+        interaction. On a bunch of traces this did not produce any
+        'some descendents ...' counts.
+
+        r.associatedEvents.forEach(function(event) {
+          event.visited = true;
+        });
+        r.associatedEvents.forEach(function(event) {
+          var nvisited = 0;
+          var ndescendents = 0;
+          if ('iterateAllDescendents' in event) {
+            event.iterateAllDescendents(function(descendent) {
+              nvisited += (descendent.visited ? 1 : 0);
+              ndescendents++;
+            });
+          }
+          if (ndescendents == 0) {
+            name = 'no descendents';
+          } else if (!nvisited) {
+            name = 'no descendents visited';
+          } else if (nvisited == ndescendents) {
+            name = 'all descendents visited';
+          } else {
+            name = 'some descendents visited: ' + nvisited + '/' + ndescendents;
+          }
+          count = eventHisto[name] || 0;
+          eventHisto[name] = count + 1;
+        });
+*/</script>

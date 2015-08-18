@@ -245,23 +245,7 @@ tr.exportTo('pie', function() {
   function m(results, runInfo, model) {
     var frames = findFrames(model);
     results.addValue(new pi.v.DictValue(runInfo, 'frames', frames.frames));
-/*
-    var eventHisto = {};
-    model.interaction_records
-      .filter(function(x) {
-        return x instanceof tr.e.rail.RAILInteractionRecord;
-      })
-      .forEach(function(r) {
-        var name = kind(r);
-        var count = eventHisto[name] || 0;
-        eventHisto[name] = count + 1;
 
-        name += '/' + r.associatedEvents.length;
-        count = eventHisto[name] || 0;
-        eventHisto[name] = count + 1;
-      });
-    results.addValue(new pi.v.DictValue(runInfo, 'counts', eventHisto));
-*/
     var perTasksTimeInThirdPartyFrames = [];
     for (var slice of lift(topLevelSlices)(mainThreads(model))) {
       perTasksTimeInThirdPartyFrames.push({
@@ -273,60 +257,17 @@ tr.exportTo('pie', function() {
     // Ideas for my own buckets:
     // Renderer thread tasks taking >75ms.
     // Events between WebViewImpl::beginFrames.
-
-    // Want to determine:
-    // RAIL budget
-    // Total time
-    // Time in 3rd parties
-    var data = [];
-    model.interaction_records.forEach(function(record) {
-      var datum = {
-        kind: kind(record),
-        durationMsec: record.duration
-      };
-      data.push(datum);
-    });
+    // Use RAIL interaction records to group things.
     results.addValue(new pi.v.DictValue(runInfo, 'dataset', {
-      data: data,
       taskThirdPartyTime: perTasksTimeInThirdPartyFrames
     }));
 
-    // Experimentally, it if an event is in associatedEvents, so are
-    // all of its descendents.
+    // Note to self: if an event is in a RAIL interaction record's
+    // associatedEvents, so are all of its descendents.
   }
   pi.MapFunction.register(m);
   return {
     m: m
   };
 });
-
-/*
-        Experiment to verify that all descendents appear in a RAIL
-        interaction. On a bunch of traces this did not produce any
-        'some descendents ...' counts.
-
-        r.associatedEvents.forEach(function(event) {
-          event.visited = true;
-        });
-        r.associatedEvents.forEach(function(event) {
-          var nvisited = 0;
-          var ndescendents = 0;
-          if ('iterateAllDescendents' in event) {
-            event.iterateAllDescendents(function(descendent) {
-              nvisited += (descendent.visited ? 1 : 0);
-              ndescendents++;
-            });
-          }
-          if (ndescendents == 0) {
-            name = 'no descendents';
-          } else if (!nvisited) {
-            name = 'no descendents visited';
-          } else if (nvisited == ndescendents) {
-            name = 'all descendents visited';
-          } else {
-            name = 'some descendents visited: ' + nvisited + '/' + ndescendents;
-          }
-          count = eventHisto[name] || 0;
-          eventHisto[name] = count + 1;
-        });
-*/</script>
+</script>

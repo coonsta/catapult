@@ -126,7 +126,17 @@ tr.exportTo('pie', function() {
   Frames.prototype = Object.create(Object.prototype, {
     find: {
       value: function(id, opt_time) {
-        return this.frames[id] && this.frames[id][0];
+        var time = opt_time || 0;
+        var xs = this.frames[id];
+        if (!xs) {
+          return null;
+        }
+        for (var x of xs) {
+          if (!('until' in x) || time < x.until) {
+            return x;
+          }
+        }
+        return null;
       }
     }
   });
@@ -228,7 +238,7 @@ tr.exportTo('pie', function() {
         return sum + timeInThirdPartyFrames(frames, subSlice);
       }, 0);
     }
-    var frame = frames.find(frameId);
+    var frame = frames.find(frameId, slice.start);
     if (!frame) {
       // FIXME, this happens in every trace, where are these phantom frames
       // coming from?

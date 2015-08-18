@@ -34,6 +34,16 @@ tr.exportTo('pie', function() {
     return a[0] == b[0];
   }
 
+  // FIXME: Remove this when V8 implements Array.prototype.find.
+  Array.prototype.find = function(callback) {
+    for (var x of this) {
+      if (callback(x)) {
+        return x;
+      }
+    }
+    return undefined;
+  };
+
   // Finds frame loads and classifies them as same-origin or
   // cross-origin (also known as "third party".) Limitations: This
   // does not handle a frame being navigated and reused; it uses
@@ -57,20 +67,25 @@ tr.exportTo('pie', function() {
               'RenderFrameImpl::didCommitProvisionalLoad; ' +
               'cannot guess what URL is loaded in frame ' + frameId;
       }
-      if (frameId in frames) {
-        if (lastUrl != frames[frameId].url) {
-          // TODO: This does happen, and we could handle it by dividing frame
-          // IDs up into disjoint time ranges.
-          throw 'encountered multiple CommitLoads for ' + frameId + ': "' +
-                frames[frameId].url + '" and "' + lastUrl + '"';
-        }
-        lastUrl = null;
-        return;
+      if (!(frameId in frames)) {
+        frames[frameId] = [];
+      }
+      var framesWithThisId = frames[frameId];
+      var lastFrameWithThisId = framesWithThisId.length
+            ? framesWithThisId[framesWithThisId.length - 1]
+            : null;
+      if (lastFrameWithThisId) {
+          if (lastUrl == lastFrameWithThisId.url) {
+            lastUrl = null;
+            return;
+          }
+          // We divide this frame up into distinct time ranges.
+          lastFrameWithThisId.until = event.start;
       }
 
       var frame = {url: lastUrl};
       lastUrl = null;
-      frames[frameId] = frame;
+      framesWithThisId.push(frame);
 
       frame.isMainFrame = event.args.data.isMainFrame;
       if (frame.isMainFrame) {
@@ -86,19 +101,35 @@ tr.exportTo('pie', function() {
       throw 'did not find a main frame';
     }
 
-    var mainFrameUrl = frames[mainFrameId].url;
+    var mainFrameUrl = frames[mainFrameId].find(function(frame) {
+      return frame.isMainFrame;
+    }).url;
+
     for (var id in frames) {
-      if (!(frames.hasOwnProperty(id) && frames[id].url)) {
+      if (!frames.hasOwnProperty(id)) {
         continue;
       }
-      frames[id].isSameOrigin = isSameOrigin(frames[id].url, mainFrameUrl);
+
+      frames[id].forEach(function(frame) {
+        frame.isSameOrigin = isSameOrigin(frame.url, mainFrameUrl);
+      });
     }
 
-    return {
-      mainFrameId: mainFrameId,
-      frames: frames
-    };
+    return new Frames(mainFrameId, frames);
   }
+
+  function Frames(mainFrameId, frames) {
+    this.mainFrameId = mainFrameId;
+    this.frames = frames;
+  }
+
+  Frames.prototype = Object.create(Object.prototype, {
+    find: {
+      value: function(id, opt_time) {
+        return this.frames[id] && this.frames[id][0];
+      }
+    }
+  });
 
   // Finds CrRendererMain in model.
   function* mainThreads(model) {
@@ -133,7 +164,7 @@ tr.exportTo('pie', function() {
   }
 
   // Hackily finds a frame ID associated with a slice.
-  function findFrame(slice) {
+  function frameOfSlice(slice) {
     switch (slice.title) {
       case 'EvaluateScript':
       case 'FireAnimationFrame':
@@ -191,20 +222,20 @@ tr.exportTo('pie', function() {
   }
 
   function timeInThirdPartyFrames(frames, slice) {
-    var frameId = findFrame(slice);
+    var frameId = frameOfSlice(slice);
     if (!frameId) {
       return slice.subSlices.reduce(function(sum, subSlice) {
         return sum + timeInThirdPartyFrames(frames, subSlice);
       }, 0);
     }
-    var frame = frames.frames[frameId];
+    var frame = frames.find(frameId);
     if (!frame) {
-      var frameIds = [];
-      for (var f in frames.frames) {
-        frameIds.push(f);
-      }
       // FIXME, this happens in every trace, where are these phantom frames
       // coming from?
+      //var frameIds = [];
+      //for (var f in frames.frames) {
+      //  frameIds.push(f);
+      //}
       //throw 'did not find a recorded frame with ID ' + frameId + '; frames are: ' + frameIds.join(', ');
       return 0;
     }
@@ -213,8 +244,7 @@ tr.exportTo('pie', function() {
 
   function m(results, runInfo, model) {
     var frames = findFrames(model);
-    results.addValue(new pi.v.DictValue(runInfo, 'frames', frames));
-
+    results.addValue(new pi.v.DictValue(runInfo, 'frames', frames.frames));
 /*
     var eventHisto = {};
     model.interaction_records

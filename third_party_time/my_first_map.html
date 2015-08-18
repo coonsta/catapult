@@ -100,27 +100,30 @@ tr.exportTo('pie', function() {
     };
   }
 
-  // Finds CrRendererMain in model. Throws if there is more than one.
-  function mainThread(model) {
-    var mainThread;
+  // Finds CrRendererMain in model.
+  function* mainThreads(model) {
+    var count = 0;
     for (var pid in model.processes) {
       var process = model.processes[pid];
       for (var tid in process.threads) {
         var thread = process.threads[tid];
         if (thread.name == 'CrRendererMain') {
-          if (mainThread) {
-            // TODO: We could support analyzing multiple main threads
-            // by returning a collection of them.
-            throw 'found multiple renderer main threads';
-          }
-          mainThread = thread;
+          count++;
+          yield thread;
         }
       }
     }
-    if (!mainThread) {
+    if (!count) {
       throw 'did not find a main thread';
     }
-    return mainThread;
+  }
+
+  function lift(f) {
+    return function*(xs) {
+      for (var x of xs) {
+        yield* f(x);
+      }
+    };
   }
 
   function topLevelSlices(thread) {
@@ -230,12 +233,12 @@ tr.exportTo('pie', function() {
     results.addValue(new pi.v.DictValue(runInfo, 'counts', eventHisto));
 */
     var perTasksTimeInThirdPartyFrames = [];
-    topLevelSlices(mainThread(model)).forEach(function(slice) {
+    for (var slice of lift(topLevelSlices)(mainThreads(model))) {
       perTasksTimeInThirdPartyFrames.push({
         duration: slice.duration,
         thirdPartyDuration: timeInThirdPartyFrames(frames, slice)
       });
-    });
+    }
 
     // Ideas for my own buckets:
     // Renderer thread tasks taking >75ms.

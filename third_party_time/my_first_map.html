@@ -231,12 +231,19 @@ tr.exportTo('pie', function() {
     return null;
   }
 
-  function timeInThirdPartyFrames(frames, slice) {
+  function bucketTimeInFrames(frames, slice, opt_totals) {
+    var totals = opt_totals || {firstParty: 0, thirdParty: 0, unaccounted: 0};
     var frameId = frameOfSlice(slice);
     if (!frameId) {
-      return slice.subSlices.reduce(function(sum, subSlice) {
-        return sum + timeInThirdPartyFrames(frames, subSlice);
-      }, 0);
+      var subtotals = {firstParty: 0, thirdParty: 0, unaccounted: 0};
+      slice.subSlices.forEach(function(subSlice) {
+        bucketTimeInFrames(frames, subSlice, subtotals);
+      });
+      totals.firstParty += subtotals.firstParty;
+      totals.thirdParty += subtotals.thirdParty;
+      totals.unaccounted +=
+          slice.duration - (subtotals.firstParty + subtotals.thirdParty);
+      return totals;
     }
     var frame = frames.find(frameId, slice.start);
     if (!frame) {
@@ -247,20 +254,27 @@ tr.exportTo('pie', function() {
       //  frameIds.push(f);
       //}
       //throw 'did not find a recorded frame with ID ' + frameId + '; frames are: ' + frameIds.join(', ');
-      return 0;
+      totals.unaccounted += slice.duration;
+      return totals;
     }
-    return frame.isSameOrigin ? 0 : slice.duration;
+    // We stop at the outermost frame and attribute all of the time to it.
+    if (frame.isSameOrigin) {
+      totals.firstParty += slice.duration;
+    } else {
+      totals.thirdParty += slice.duration;
+    }
+    return totals;
   }
 
   function m(results, runInfo, model) {
     var frames = findFrames(model);
     results.addValue(new pi.v.DictValue(runInfo, 'frames', frames.frames));
 
-    var perTasksTimeInThirdPartyFrames = [];
+    var timeInFramesPerTask = [];
     for (var slice of lift(topLevelSlices)(mainThreads(model))) {
-      perTasksTimeInThirdPartyFrames.push({
+      timeInFramesPerTask.push({
         duration: slice.duration,
-        thirdPartyDuration: timeInThirdPartyFrames(frames, slice)
+        buckets: bucketTimeInFrames(frames, slice)
       });
     }
 
@@ -269,7 +283,7 @@ tr.exportTo('pie', function() {
     // Events between WebViewImpl::beginFrames.
     // Use RAIL interaction records to group things.
     results.addValue(new pi.v.DictValue(runInfo, 'dataset', {
-      taskThirdPartyTime: perTasksTimeInThirdPartyFrames
+      timeInFramesPerTask: timeInFramesPerTask
     }));
 
     // Note to self: if an event is in a RAIL interaction record's

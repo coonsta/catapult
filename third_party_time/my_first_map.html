@@ -17,7 +17,7 @@ tr.exportTo('pie', function() {
     if (o instanceof tr.e.rail.LoadInteractionRecord) {
       return 'load';
     }
-    throw 'no idea what kind of thing this is';
+    return null;
   }
 
   // Guesses whether two URLs have the same origin.
@@ -270,11 +270,24 @@ tr.exportTo('pie', function() {
     var frames = findFrames(model);
     results.addValue(new pi.v.DictValue(runInfo, 'frames', frames.frames));
 
+    // Tag events with their RAIL phase
+    model.interaction_records
+      .filter(function(record) {
+        return record instanceof tr.e.rail.RAILInteractionRecord;
+      })
+      .forEach(function(record) {
+        var railKind = kind(record) || 'unknown';
+        record.associatedEvents.forEach(function(event) {
+          event.railKind = railKind;
+        });
+      });
+
     var timeInFramesPerTask = [];
     for (var slice of lift(topLevelSlices)(mainThreads(model))) {
       timeInFramesPerTask.push({
         duration: slice.duration,
-        buckets: bucketTimeInFrames(frames, slice)
+        buckets: bucketTimeInFrames(frames, slice),
+        kind: slice.railKind || "missing"
       });
     }
 

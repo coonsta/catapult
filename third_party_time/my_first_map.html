@@ -42,18 +42,23 @@ tr.exportTo('pie', function() {
 
   // Web platform stuff.
 
+  function cheesyOrigin(url) {
+    var cheesyOriginPattern = /^([^:]+):(\/\/)?([^/]+)/;
+    var match = url.match(cheesyOriginPattern);
+    return match && match[0];
+  }
+
   // Guesses whether two URLs have the same origin.
   function isSameOrigin(urlA, urlB) {
-    var cheesyOriginPattern = /^([^:]+):(\/\/)?([^/]+)/;
-    var a = urlA.match(cheesyOriginPattern);
-    var b = urlB.match(cheesyOriginPattern);
+    var a = cheesyOrigin(urlA)
+    var b = cheesyOrigin(urlB);
     if (!a) {
       throw 'failed to cheesily parse "' + urlA + '"';
     }
     if (!b) {
       throw 'failed to cheesily parse "' + urlB + '"';
     }
-    return a[0] == b[0];
+    return a == b;
   }
 
   // Performance insights model grovelling stuff.
@@ -234,11 +239,12 @@ tr.exportTo('pie', function() {
       });
     }
 
-    return new Frames(mainFrameId, frames);
+    return new Frames(mainFrameId, mainFrameUrl, frames);
   }
 
-  function Frames(mainFrameId, frames) {
+  function Frames(mainFrameId, mainFrameUrl, frames) {
     this.mainFrameId = mainFrameId;
+    this.mainFrameUrl = mainFrameUrl;
     this.frames = frames;
   }
 
@@ -378,6 +384,7 @@ tr.exportTo('pie', function() {
     for (var slice of subslices(lift(topLevelSlices)(mainThreads(model)))) {
       timeInFramesPerTask.push({
         duration: slice.duration,
+        origin: cheesyOrigin(frames.mainFrameUrl),
         buckets: bucketTimeInFrames(frames, slice).summarize(),
         kind: slice.railKind || "missing"
       });

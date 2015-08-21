@@ -4,21 +4,43 @@
 <script>'use strict';
 
 tr.exportTo('pie', function() {
-  function kind(o) {
-    if (o instanceof tr.e.rail.ResponseInteractionRecord) {
-      return 'response';
+  // General-purpose stuff.
+
+  // FIXME: Replace this with Reflect.ownKeys when V8 implements Reflect.
+  function* keys(o) {
+    for (var p in o) {
+      if (o.hasOwnProperty(p)) {
+        yield p;
+      }
     }
-    if (o instanceof tr.e.rail.IdleInteractionRecord) {
-      return 'idle';
-    }
-    if (o instanceof tr.e.rail.AnimationInteractionRecord) {
-      return 'animation';
-    }
-    if (o instanceof tr.e.rail.LoadInteractionRecord) {
-      return 'load';
-    }
-    return null;
   }
+
+  // Concatenates two iterators.
+  function* concatIterators(xs, ys) {
+    yield* xs;
+    yield* ys;
+  }
+
+  // ('a -> 'b iterator) -> 'a iterator -> 'b iterator
+  function lift(f) {
+    return function*(xs) {
+      for (var x of xs) {
+        yield* f(x);
+      }
+    };
+  }
+
+  // FIXME: Remove this when V8 implements Array.prototype.find.
+  Array.prototype.find = function(callback) {
+    for (var x of this) {
+      if (callback(x)) {
+        return x;
+      }
+    }
+    return undefined;
+  };
+
+  // Web platform stuff.
 
   // Guesses whether two URLs have the same origin.
   function isSameOrigin(urlA, urlB) {
@@ -34,15 +56,112 @@ tr.exportTo('pie', function() {
     return a[0] == b[0];
   }
 
-  // FIXME: Remove this when V8 implements Array.prototype.find.
-  Array.prototype.find = function(callback) {
-    for (var x of this) {
-      if (callback(x)) {
-        return x;
+  // Performance insights model grovelling stuff.
+
+  // Finds CrRendererMain in model.
+  function* mainThreads(model) {
+    var count = 0;
+    for (var pid in model.processes) {
+      var process = model.processes[pid];
+      for (var tid in process.threads) {
+        var thread = process.threads[tid];
+        if (thread.name == 'CrRendererMain') {
+          count++;
+          yield thread;
+        }
       }
     }
-    return undefined;
-  };
+    if (!count) {
+      throw 'did not find a main thread';
+    }
+  }
+
+  function topLevelSlices(thread) {
+    return thread.sliceGroup.slices.filter(function (s) {
+      return s.category == 'toplevel';
+    });
+  }
+
+  var subslices = lift(function* (slice) {
+    yield* slice.subSlices;
+  });
+
+  // Hackily finds a frame ID associated with a slice.
+  function frameOfSlice(slice) {
+    switch (slice.title) {
+      case 'EvaluateScript':
+      case 'FireAnimationFrame':
+      case 'FunctionCall':
+      case 'TimerFire':
+      case 'XHRLoad':
+      case 'XHRReadyStateChange':
+      // FIXME: Should layout, paint costs be broken out? Probably.
+      case 'Paint':
+      case 'UpdateLayerTree':
+        return slice.args.data.frame;
+
+      case 'ParseHTML':
+      // FIXME: Should layout, paint costs be broken out? Probably.
+      case 'Layout':
+      case 'UpdateLayoutTree':
+        return slice.args.beginData.frame;
+
+      // Not sure about these:
+      case 'CommitLoad':
+      case 'MarkDOMContent':
+      case 'MarkLoad':
+      case 'ResourceReceiveResponse':
+      case 'ResourceReceivedData':
+      case 'ResourceSendRequest':
+        // Ignored.
+        return null;
+
+      // Not interested in these; graphics:
+      case 'LayerTreeHost::DoUpdateLayers': // source_frame_number
+      case 'PictureLayer::Update':          // source_frame_number
+      case 'ThreadProxy::BeginMainFrame':   // begin_frame_id
+        // Ignored.
+        return null;
+
+      default:
+        break;
+    }
+
+    // Sanity check: Look for other things that have a frame hanging
+    // around one or two levels in.
+    for (var prop in slice.args) {
+      var looksLikeAFrame = /[Ff]rame/;
+      if (looksLikeAFrame.test(prop)) {
+        throw 'found ' + slice.title + ' has frame-y property ' + prop;
+      }
+      for (var subprop in slice.args[prop]) {
+        if (looksLikeAFrame.test(subprop)) {
+          throw 'found ' + slice.title + ' has frame-y property ' + prop + '.' + subprop;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  // Gets a string that describes a RAILInteractionRecord.
+  function kindOfInteraction(o) {
+    if (o instanceof tr.e.rail.ResponseInteractionRecord) {
+      return 'response';
+    }
+    if (o instanceof tr.e.rail.IdleInteractionRecord) {
+      return 'idle';
+    }
+    if (o instanceof tr.e.rail.AnimationInteractionRecord) {
+      return 'animation';
+    }
+    if (o instanceof tr.e.rail.LoadInteractionRecord) {
+      return 'load';
+    }
+    return null;
+  }
+
+  // This analysis.
 
   // Finds frame loads and classifies them as same-origin or
   // cross-origin (also known as "third party".) Limitations: This
@@ -141,136 +260,105 @@ tr.exportTo('pie', function() {
     }
   });
 
-  // Finds CrRendererMain in model.
-  function* mainThreads(model) {
-    var count = 0;
-    for (var pid in model.processes) {
-      var process = model.processes[pid];
-      for (var tid in process.threads) {
-        var thread = process.threads[tid];
-        if (thread.name == 'CrRendererMain') {
-          count++;
-          yield thread;
+  function Totals() {
+    this.firstParty = 0;
+    this.thirdParty = 0;
+    this.unaccounted = 0;
+    this.firstPartyLabels = {};
+    this.thirdPartyLabels = {};
+    this.unaccountedLabels = {};
+  }
+
+  Totals.prototype = Object.create(Object.prototype, {
+    accumulate: {
+      value: function(slice, subtotals) {
+        // First party
+        this.firstParty += subtotals.firstParty;
+        this.firstPartyLabels =
+          Totals.mergeLabelSets_(this.firstPartyLabels,
+                                 subtotals.firstPartyLabels);
+
+        // Third party
+        this.thirdParty += subtotals.thirdParty;
+        this.thirdPartyLabels =
+          Totals.mergeLabelSets_(this.thirdPartyLabels,
+                                 subtotals.thirdPartyLabels);
+
+        // Unaccounted
+        var unaccounted =
+              slice.duration - (subtotals.firstParty + subtotals.thirdParty);
+        this.unaccounted += unaccounted;
+        if (unaccounted) {
+          this.unaccountedLabels[slice.title] = slice.title;
         }
+        this.unaccountedLabels =
+          Totals.mergeLabelSets_(this.unaccountedLabels,
+                                 subtotals.unaccountedLabels);
+
+        return this;
+      }
+    },
+
+    summarize: {
+      value: function() {
+        this.firstPartyLabels = Totals.summarizeLabels_(this.firstPartyLabels);
+        this.thirdPartyLabels = Totals.summarizeLabels_(this.thirdPartyLabels);
+        // Not interested in this for now; it is probably voluminous.
+        // this.unaccountedLabels = Totals.summarizeLabels_(this.unaccountedLabels);
+        delete this.unaccountedLabels;
+        return this;
       }
     }
-    if (!count) {
-      throw 'did not find a main thread';
-    }
-  }
-
-  function lift(f) {
-    return function*(xs) {
-      for (var x of xs) {
-        yield* f(x);
-      }
-    };
-  }
-
-  function topLevelSlices(thread) {
-    return thread.sliceGroup.slices.filter(function (s) {
-      return s.category == 'toplevel';
-    });
-  }
-
-  var subslices = lift(function* (slice) {
-    yield* slice.subSlices;
   });
 
-  // Hackily finds a frame ID associated with a slice.
-  function frameOfSlice(slice) {
-    switch (slice.title) {
-      case 'EvaluateScript':
-      case 'FireAnimationFrame':
-      case 'FunctionCall':
-      case 'TimerFire':
-      case 'XHRLoad':
-      case 'XHRReadyStateChange':
-      // FIXME: Should layout, paint costs be broken out? Probably.
-      case 'Paint':
-      case 'UpdateLayerTree':
-        return slice.args.data.frame;
-
-      case 'ParseHTML':
-      // FIXME: Should layout, paint costs be broken out? Probably.
-      case 'Layout':
-      case 'UpdateLayoutTree':
-        return slice.args.beginData.frame;
-
-      // Not sure about these:
-      case 'CommitLoad':
-      case 'MarkDOMContent':
-      case 'MarkLoad':
-      case 'ResourceReceiveResponse':
-      case 'ResourceReceivedData':
-      case 'ResourceSendRequest':
-        // Ignored.
-        return null;
-
-      // Not interested in these; graphics:
-      case 'LayerTreeHost::DoUpdateLayers': // source_frame_number
-      case 'PictureLayer::Update':          // source_frame_number
-      case 'ThreadProxy::BeginMainFrame':   // begin_frame_id
-        // Ignored.
-        return null;
-
-      default:
-        break;
+  Totals.summarizeLabels_ = function(it) {
+    var ls = [];
+    for (var x in it) {
+      ls.push(x);
     }
+    ls.sort();
+    return ls.join('/');
+  };
 
-    // Sanity check: Look for other things that have a frame hanging
-    // around one or two levels in.
-    for (var prop in slice.args) {
-      var looksLikeAFrame = /[Ff]rame/;
-      if (looksLikeAFrame.test(prop)) {
-        throw 'found ' + slice.title + ' has frame-y property ' + prop;
-      }
-      for (var subprop in slice.args[prop]) {
-        if (looksLikeAFrame.test(subprop)) {
-          throw 'found ' + slice.title + ' has frame-y property ' + prop + '.' + subprop;
-        }
-      }
+  Totals.mergeLabelSets_ = function(xs, ys) {
+    var zs = {};
+    for (var p of concatIterators(keys(xs), keys(ys))) {
+      zs[p] = p;
     }
-
-    return null;
-  }
+    return zs;
+  };
 
   function bucketTimeInFrames(frames, slice, opt_totals) {
-    var totals = opt_totals || {firstParty: 0, thirdParty: 0, unaccounted: 0};
+    var totals = opt_totals || new Totals();
     var frameId = frameOfSlice(slice);
     if (!frameId) {
-      var subtotals = {firstParty: 0, thirdParty: 0, unaccounted: 0};
+      var subtotals = new Totals();
       slice.subSlices.forEach(function(subSlice) {
         bucketTimeInFrames(frames, subSlice, subtotals);
       });
-      totals.firstParty += subtotals.firstParty;
-      totals.thirdParty += subtotals.thirdParty;
-      totals.unaccounted +=
-          slice.duration - (subtotals.firstParty + subtotals.thirdParty);
+      totals.accumulate(slice, subtotals);
       return totals;
     }
     var frame = frames.find(frameId, slice.start);
     if (!frame) {
       // FIXME, this happens in every trace, where are these phantom frames
       // coming from?
-      //var frameIds = [];
-      //for (var f in frames.frames) {
-      //  frameIds.push(f);
-      //}
-      //throw 'did not find a recorded frame with ID ' + frameId + '; frames are: ' + frameIds.join(', ');
       totals.unaccounted += slice.duration;
+      totals.unaccountedLabels[slice.title] = slice.title;
       return totals;
     }
     // We stop at the outermost frame and attribute all of the time to it.
     if (frame.isSameOrigin) {
       totals.firstParty += slice.duration;
+      totals.firstPartyLabels[slice.title] = slice.title;
     } else {
       totals.thirdParty += slice.duration;
+      totals.thirdPartyLabels[slice.title] = slice.title;
     }
     return totals;
   }
 
-  function m(results, runInfo, model) {
+  function mapper(results, runInfo, model) {
     var frames = findFrames(model);
     results.addValue(new pi.v.DictValue(runInfo, 'frames', frames.frames));
 
@@ -280,7 +368,7 @@ tr.exportTo('pie', function() {
         return record instanceof tr.e.rail.RAILInteractionRecord;
       })
       .forEach(function(record) {
-        var railKind = kind(record) || 'unknown';
+        var railKind = kindOfInteraction(record) || 'unknown';
         record.associatedEvents.forEach(function(event) {
           event.railKind = railKind;
         });
@@ -290,7 +378,7 @@ tr.exportTo('pie', function() {
     for (var slice of subslices(lift(topLevelSlices)(mainThreads(model)))) {
       timeInFramesPerTask.push({
         duration: slice.duration,
-        buckets: bucketTimeInFrames(frames, slice),
+        buckets: bucketTimeInFrames(frames, slice).summarize(),
         kind: slice.railKind || "missing"
       });
     }
@@ -306,7 +394,7 @@ tr.exportTo('pie', function() {
     // Note to self: if an event is in a RAIL interaction record's
     // associatedEvents, so are all of its descendents.
   }
-  pi.MapFunction.register(m);
+  pi.MapFunction.register(mapper);
   return null; // No bindings.
 });
 </script>

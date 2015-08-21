@@ -173,6 +173,10 @@ tr.exportTo('pie', function() {
     });
   }
 
+  var subslices = lift(function* (slice) {
+    yield* slice.subSlices;
+  });
+
   // Hackily finds a frame ID associated with a slice.
   function frameOfSlice(slice) {
     switch (slice.title) {
@@ -283,7 +287,7 @@ tr.exportTo('pie', function() {
       });
 
     var timeInFramesPerTask = [];
-    for (var slice of lift(topLevelSlices)(mainThreads(model))) {
+    for (var slice of subslices(lift(topLevelSlices)(mainThreads(model)))) {
       timeInFramesPerTask.push({
         duration: slice.duration,
         buckets: bucketTimeInFrames(frames, slice),
